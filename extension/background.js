@@ -64,6 +64,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch(err => sendResponse({ error: err.message }));
     return true;
   }
+  if (message.type === 'GET_BACKEND_URL') {
+    getBackendUrl().then(url => sendResponse({ url }));
+    return true;
+  }
 });
 
 // ── Screenshot capture ──────────────────────────────────────────
