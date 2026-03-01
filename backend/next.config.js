@@ -1,7 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Vercel-optimised: enable standalone output for smaller deploys
-  output: 'standalone',
+  // NOTE: 'standalone' output removed — Vercel manages deployment output natively
 
   async headers() {
     return [
@@ -16,7 +15,6 @@ const nextConfig = {
     ];
   },
 
-  // Required for ElevenLabs + Deploy AI fetch calls from server components
   experimental: {
     serverComponentsExternalPackages: [],
   },
