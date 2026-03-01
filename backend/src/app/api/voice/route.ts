@@ -4,6 +4,7 @@ import { coordinate } from '@/lib/coordinator';
 import { runAgentA } from '@/lib/agentA';
 import { runAgentB } from '@/lib/agentB';
 import { logAgentAction } from '@/lib/supabase';
+import { validateAction, sanitizeAction } from '@/lib/safety';
 import { VoiceRequest, VoiceResponse } from '@/types';
 
 const VoiceRequestSchema = z.object({
@@ -16,7 +17,7 @@ const VoiceRequestSchema = z.object({
     selectedText: z.string().optional(),
     bodyText: z.string().optional(),
   }),
-  vapiRecording: z.string().nullable().optional(),
+  vapiRecording: z.string().nullable().optional(), // carries ElevenLabs recordingId
 });
 
 export async function POST(req: NextRequest) {
@@ -26,7 +27,7 @@ export async function POST(req: NextRequest) {
     const request: VoiceRequest = validated;
 
     // Step 1: Coordinator routing (<10ms, no LLM)
-    coordinate(request); // determines route for logging
+    coordinate(request);
 
     await logAgentAction({
       sessionId: request.sessionId,
@@ -49,17 +50,15 @@ export async function POST(req: NextRequest) {
       durationMs: Date.now() - startA,
     });
 
-    // If agent A handles it alone, return early
     if (agentAResult.route === 'agent_a_only') {
-      const response: VoiceResponse = {
+      return NextResponse.json({
         sessionId: request.sessionId,
         responseText: agentAResult.responseText || '',
         requiresApproval: false,
-      };
-      return NextResponse.json(response);
+      } satisfies VoiceResponse);
     }
 
-    // Step 3: Agent B — Workspace Executor (Vapi recording chained)
+    // Step 3: Agent B — Workspace Executor (ElevenLabs recordingId chained)
     const requestWithRecording: VoiceRequest = {
       ...request,
       vapiRecording: agentAResult.vapiRecording ?? request.vapiRecording,
@@ -70,30 +69,48 @@ export async function POST(req: NextRequest) {
     await logAgentAction({
       sessionId: request.sessionId,
       agentName: 'agent_b',
-      input: {
-        intent: agentAResult.intent,
-        vapiRecording: !!requestWithRecording.vapiRecording,
-      },
+      input: { intent: agentAResult.intent, recordingChained: !!requestWithRecording.vapiRecording },
       output: agentBResult as unknown as Record<string, unknown>,
       timestamp: new Date().toISOString(),
       durationMs: Date.now() - startB,
     });
 
-    const response: VoiceResponse = {
+    // Step 4: Safety gate — validate + sanitize action before sending to extension
+    let finalAction = agentBResult.action;
+    let requiresApproval = agentBResult.requiresApproval;
+    let actionDescription = agentBResult.actionDescription;
+
+    if (finalAction) {
+      const safetyResult = validateAction(finalAction);
+      finalAction = sanitizeAction(finalAction);
+
+      // Safety gate can escalate approval requirement
+      if (safetyResult.requiresApproval) requiresApproval = true;
+      if (!safetyResult.safe) {
+        actionDescription = `⚠️ ${safetyResult.reason}`;
+      }
+
+      await logAgentAction({
+        sessionId: request.sessionId,
+        agentName: 'safety_gate',
+        input: { actionType: finalAction.type },
+        output: safetyResult as unknown as Record<string, unknown>,
+        timestamp: new Date().toISOString(),
+        durationMs: 0,
+      });
+    }
+
+    return NextResponse.json({
       sessionId: request.sessionId,
       responseText: agentBResult.responseText,
-      action: agentBResult.action,
-      requiresApproval: agentBResult.requiresApproval,
-      actionDescription: agentBResult.actionDescription,
-    };
+      action: finalAction,
+      requiresApproval,
+      actionDescription,
+    } satisfies VoiceResponse);
 
-    return NextResponse.json(response);
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return NextResponse.json(
-        { error: 'Invalid request', details: error.errors },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Invalid request', details: error.errors }, { status: 400 });
     }
     console.error('[/api/voice]', error);
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
