@@ -4,6 +4,19 @@
 let currentSessionId = null;
 let overlayActive = false;
 
+// ── Backend URL ───────────────────────────────────────────────────────────
+const DEFAULT_BACKEND = 'https://565ybsck.run.complete.dev';
+
+async function getBackendUrl() {
+  try {
+    const { backendUrl } = await chrome.storage.sync.get('backendUrl');
+    return backendUrl || DEFAULT_BACKEND;
+  } catch {
+    return DEFAULT_BACKEND;
+  }
+}
+
+// ── Hotkey / toolbar click ──────────────────────────────────────────────
 chrome.action.onClicked.addListener(async (tab) => { await toggleOverlay(tab); });
 
 chrome.commands.onCommand.addListener(async (command) => {
@@ -24,6 +37,7 @@ async function toggleOverlay(tab) {
   }
 }
 
+// ── Message router ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'VOICE_COMMAND') {
     handleVoiceCommand(message.payload, sender.tab)
@@ -31,7 +45,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message.type === 'ANALYZE_SCREEN') {
-    // Dedicated screen analysis: capture + ask the AI what it sees
     handleAnalyzeScreen(sender.tab)
       .then(sendResponse).catch(err => sendResponse({ error: err.message }));
     return true;
@@ -45,14 +58,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     overlayActive = false;
     currentSessionId = null;
   }
+  if (message.type === 'SET_BACKEND_URL') {
+    chrome.storage.sync.set({ backendUrl: message.url })
+      .then(() => sendResponse({ success: true }))
+      .catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
 });
 
 // ── Screenshot capture ──────────────────────────────────────────────────
 async function captureScreenshot() {
   try {
-    // captureVisibleTab requires activeTab or <all_urls> permission — both present
     const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
-    // Strip the data URL prefix, return raw base64
     return dataUrl.replace(/^data:image\/png;base64,/, '');
   } catch (err) {
     console.warn('[Screenshot] Capture failed:', err.message);
@@ -60,14 +77,14 @@ async function captureScreenshot() {
   }
 }
 
-// ── Voice command handler (includes auto-screenshot) ─────────────────────
+// ── Voice command (auto-attaches screenshot) ───────────────────────────
 async function handleVoiceCommand(payload, tab) {
-  // Transcribe audio if needed
   let transcript = payload.transcript;
   let recordingId = null;
 
   if (!transcript && payload.audioBase64) {
-    const sttResult = await fetch(`${getBackendUrl()}/api/transcribe`, {
+    const backend = await getBackendUrl();
+    const sttResult = await fetch(`${backend}/api/transcribe`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ audioBase64: payload.audioBase64, mimeType: payload.mimeType || 'audio/webm' })
@@ -77,11 +94,13 @@ async function handleVoiceCommand(payload, tab) {
     recordingId = sttData.recordingId;
   }
 
-  // Capture screenshot for visual context (non-blocking on failure)
-  const screenshotBase64 = await captureScreenshot();
-  const context = await getPageContext(tab);
+  const [screenshotBase64, context, backend] = await Promise.all([
+    captureScreenshot(),
+    getPageContext(tab),
+    getBackendUrl(),
+  ]);
 
-  const response = await fetch(`${getBackendUrl()}/api/voice`, {
+  const response = await fetch(`${backend}/api/voice`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -89,7 +108,7 @@ async function handleVoiceCommand(payload, tab) {
       transcript,
       pageContext: context,
       vapiRecording: recordingId,
-      screenshotBase64,  // ← GPT-4o will see the screen
+      screenshotBase64,
     })
   });
   if (!response.ok) throw new Error(`Backend error: ${response.status}`);
@@ -98,19 +117,22 @@ async function handleVoiceCommand(payload, tab) {
 
 // ── Dedicated screen analysis ───────────────────────────────────────────
 async function handleAnalyzeScreen(tab) {
-  const screenshotBase64 = await captureScreenshot();
-  const context = await getPageContext(tab);
+  const [screenshotBase64, context, backend] = await Promise.all([
+    captureScreenshot(),
+    getPageContext(tab),
+    getBackendUrl(),
+  ]);
 
   if (!screenshotBase64) {
-    return { responseText: 'Screenshot capture failed. Please grant screen capture permission.' };
+    return { responseText: 'Screenshot capture failed. Please grant screen capture permission and try again.' };
   }
 
-  const response = await fetch(`${getBackendUrl()}/api/voice`, {
+  const response = await fetch(`${backend}/api/voice`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       sessionId: currentSessionId || generateSessionId(),
-      transcript: 'Analyze what is on this screen. Describe the main content, key interactive elements (buttons, forms, links), and suggest the most useful action I could take.',
+      transcript: 'Analyze what is on this screen. Describe the main content, key interactive elements (buttons, inputs, links), the page purpose, and suggest the single most useful action I could take right now.',
       pageContext: context,
       vapiRecording: null,
       screenshotBase64,
@@ -120,9 +142,10 @@ async function handleAnalyzeScreen(tab) {
   return await response.json();
 }
 
-// ── TTS synthesis ──────────────────────────────────────────────────────
+// ── TTS ───────────────────────────────────────────────────────────────────
 async function synthesizeSpeech(text) {
-  const response = await fetch(`${getBackendUrl()}/api/tts`, {
+  const backend = await getBackendUrl();
+  const response = await fetch(`${backend}/api/tts`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text })
@@ -131,7 +154,7 @@ async function synthesizeSpeech(text) {
   return await response.json();
 }
 
-// ── Page context capture ───────────────────────────────────────────────
+// ── Page context ───────────────────────────────────────────────────────────
 async function getPageContext(tab) {
   try {
     const result = await chrome.scripting.executeScript({
@@ -146,7 +169,7 @@ async function getPageContext(tab) {
     });
     return result[0]?.result || {};
   } catch {
-    return { url: tab.url, title: tab.title, pageType: 'generic' };
+    return { url: tab?.url || '', title: tab?.title || '', pageType: 'generic' };
   }
 }
 
@@ -160,8 +183,4 @@ function detectPageType(url) {
 
 function generateSessionId() {
   return `sess_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-}
-
-function getBackendUrl() {
-  return 'http://localhost:3000';
 }
