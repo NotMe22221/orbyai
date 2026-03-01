@@ -1,10 +1,9 @@
-// ElevenLabs — Full Voice Pipeline (STT + TTS)
-// Replaces Vapi. Handles both speech input and voice output.
-// TASK-1051 + TASK-1052
+// ElevenLabs — Full Voice Pipeline (STT + TTS + Conversational Agent)
+// Agent ID: configured via ELEVENLABS_AGENT_ID env var
 
 const ELEVENLABS_API_URL = 'https://api.elevenlabs.io/v1';
 
-// ─── TTS ────────────────────────────────────────────────────────────────────
+// ─── TTS ──────────────────────────────────────────────────────────────────
 
 export interface TTSOptions {
   text: string;
@@ -23,11 +22,7 @@ export async function synthesizeSpeech(options: TTSOptions): Promise<ArrayBuffer
 
   const response = await fetch(`${ELEVENLABS_API_URL}/text-to-speech/${voiceId}`, {
     method: 'POST',
-    headers: {
-      'xi-api-key': apiKey,
-      'Content-Type': 'application/json',
-      Accept: 'audio/mpeg',
-    },
+    headers: { 'xi-api-key': apiKey, 'Content-Type': 'application/json', Accept: 'audio/mpeg' },
     body: JSON.stringify({
       text: options.text,
       model_id: modelId,
@@ -38,11 +33,7 @@ export async function synthesizeSpeech(options: TTSOptions): Promise<ArrayBuffer
     }),
   });
 
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`ElevenLabs TTS error ${response.status}: ${err}`);
-  }
-
+  if (!response.ok) throw new Error(`ElevenLabs TTS error ${response.status}: ${await response.text()}`);
   return await response.arrayBuffer();
 }
 
@@ -54,8 +45,7 @@ export async function synthesizeSpeechBase64(options: TTSOptions): Promise<strin
   return btoa(binary);
 }
 
-// ─── STT ────────────────────────────────────────────────────────────────────
-// ElevenLabs Speech-to-Text API
+// ─── STT ──────────────────────────────────────────────────────────────────
 
 export interface STTOptions {
   audioBlob: Blob;
@@ -84,23 +74,50 @@ export async function transcribeSpeech(options: STTOptions): Promise<STTResult> 
     body: formData,
   });
 
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`ElevenLabs STT error ${response.status}: ${err}`);
-  }
+  if (!response.ok) throw new Error(`ElevenLabs STT error ${response.status}: ${await response.text()}`);
 
   const data = await response.json();
-  const recordingId = `el_rec_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-
   return {
     transcript: data.text ?? '',
     confidence: data.confidence,
-    recordingId,
+    recordingId: `el_rec_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
   };
 }
 
-// ─── RECORDING CHAIN ────────────────────────────────────────────────────────
-// Critical: recording must be forwarded through Agent A → Agent B → Browser Action
+// ─── CONVERSATIONAL AGENT ───────────────────────────────────────────────
+// Uses ElevenLabs Conversational AI agent for real-time voice sessions
+// Agent ID: process.env.ELEVENLABS_AGENT_ID
+
+export async function getConversationalAgentSignedUrl(): Promise<string> {
+  const apiKey = process.env.ELEVENLABS_API_KEY;
+  const agentId = process.env.ELEVENLABS_AGENT_ID;
+  if (!apiKey) throw new Error('ELEVENLABS_API_KEY not set');
+  if (!agentId) throw new Error('ELEVENLABS_AGENT_ID not set');
+
+  const response = await fetch(
+    `${ELEVENLABS_API_URL}/convai/conversation/get_signed_url?agent_id=${agentId}`,
+    { headers: { 'xi-api-key': apiKey } }
+  );
+
+  if (!response.ok) throw new Error(`ElevenLabs signed URL error ${response.status}: ${await response.text()}`);
+  const data = await response.json();
+  return data.signed_url;
+}
+
+export async function getAgentConfig() {
+  const apiKey = process.env.ELEVENLABS_API_KEY;
+  const agentId = process.env.ELEVENLABS_AGENT_ID;
+  if (!apiKey || !agentId) throw new Error('ElevenLabs credentials not set');
+
+  const response = await fetch(`${ELEVENLABS_API_URL}/convai/agents/${agentId}`, {
+    headers: { 'xi-api-key': apiKey },
+  });
+
+  if (!response.ok) throw new Error(`ElevenLabs agent config error ${response.status}`);
+  return await response.json();
+}
+
+// ─── RECORDING CHAIN ──────────────────────────────────────────────────────
 
 export function buildRecordingChainItem(
   transcript: string,
@@ -117,7 +134,7 @@ export function buildRecordingChainItem(
   };
 }
 
-// ─── GREETING ───────────────────────────────────────────────────────────────
+// ─── GREETING ────────────────────────────────────────────────────────────
 
 export const GREETING_TEXT =
   "Hello, I'm your Resident Secretary. I'm ready to help you with any task on this page.";
