@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Resident Secretary",
-  "version": "1.0.0",
-  "description": "AI-powered browser assistant activated by voice commands",
+  "version": "1.1.0",
+  "description": "AI-powered browser assistant — voice + text commands to interact with any web page",
   "permissions": [
     "activeTab",
     "tabs",
@@ -10,22 +10,20 @@
     "scripting",
     "commands"
   ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "host_permissions": ["<all_urls>"],
   "background": {
-    "service_worker": "background.js",
-    "type": "module"
+    "service_worker": "background.js"
   },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
       "js": ["content_script.js"],
-      "css": ["overlay.css"]
+      "css": ["overlay.css"],
+      "run_at": "document_idle"
     }
   ],
   "action": {
-    "default_popup": "popup/popup.html",
+    "default_title": "Resident Secretary (Cmd+Shift+Space)",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -34,12 +32,12 @@
     }
   },
   "commands": {
-    "_execute_action": {
+    "toggle-overlay": {
       "suggested_key": {
         "default": "Ctrl+Shift+Space",
         "mac": "Command+Shift+Space"
       },
-      "description": "Activate Resident Secretary"
+      "description": "Toggle Resident Secretary overlay"
     }
   },
   "icons": {
