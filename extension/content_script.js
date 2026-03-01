@@ -9,7 +9,129 @@ let audioChunks = [];
 let isRecording = false;
 let micStream = null;
 
-// ── Message listener ─────────────────────────────────────────────────────────
+// ── ElevenLabs Conversational Agent (Screen-Aware) ─────────────────────────
+// Connects to the ElevenLabs agent WebSocket and injects the current page
+// context + screenshot description so the agent can see and react to the screen.
+let elevenLabsWs = null;
+
+function detectPageType(url) {
+  if (url.includes('github.com')) return 'github';
+  if (url.includes('gmail.com') || url.includes('mail.google.com')) return 'gmail';
+  if (url.includes('notion.so')) return 'notion';
+  if (url.includes('linear.app')) return 'linear';
+  if (url.includes('twitter.com') || url.includes('x.com')) return 'twitter';
+  if (url.includes('linkedin.com')) return 'linkedin';
+  return 'generic';
+}
+
+async function initElevenLabsAgent() {
+  try {
+    // 1. Get the backend URL from the service worker
+    const { url: backendUrl } = await chrome.runtime.sendMessage({ type: 'GET_BACKEND_URL' });
+
+    // 2. Gather current page context (fast, no LLM call)
+    const pageCtx = {
+      url: window.location.href,
+      title: document.title,
+      pageType: detectPageType(window.location.href),
+      bodyText: document.body?.innerText?.replace(/\s{3,}/g, '\n').slice(0, 3000) || '',
+    };
+
+    // 3. Fetch the ElevenLabs signed WebSocket URL from backend
+    const agentRes = await fetch(`${backendUrl}/api/agent-url`);
+    if (!agentRes.ok) return;
+    const { signedUrl } = await agentRes.json();
+    if (!signedUrl) return;
+
+    // 4. Open WebSocket to ElevenLabs Conversational Agent
+    elevenLabsWs = new WebSocket(signedUrl);
+
+    elevenLabsWs.onopen = () => {
+      // 5. Inject screen / page context into the agent's system prompt so it
+      //    can "see" the current page and react to what is on the screen.
+      elevenLabsWs.send(JSON.stringify({
+        type: 'conversation_initiation_client_data',
+        dynamic_variables: {
+          current_url: pageCtx.url,
+          page_title: pageCtx.title,
+          page_type: pageCtx.pageType,
+        },
+        overrides: {
+          agent: {
+            prompt: {
+              prompt: [
+                'You are Resident Secretary, an intelligent browser assistant.',
+                `The user is currently viewing: "${pageCtx.title}"`,
+                `URL: ${pageCtx.url}`,
+                `Page type: ${pageCtx.pageType}`,
+                '',
+                'Current page content (first 3000 characters):',
+                pageCtx.bodyText,
+                '',
+                'Use this context to answer questions about the screen, help navigate, fill forms, and execute browser tasks.',
+                'When the user asks "what do you see?" or "what is on screen?", answer based on the page content above.',
+              ].join('\n'),
+            },
+          },
+        },
+      }));
+      console.log('[RS] ElevenLabs agent connected with screen context.');
+    };
+
+    elevenLabsWs.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        // Play agent audio response
+        if (data.type === 'audio' && data.audio_event?.audio_base_64) {
+          playAudioBase64(data.audio_event.audio_base_64);
+          updateOverlayState('responding', { text: '' });
+        }
+        // Show agent text reply in the overlay
+        if (data.type === 'agent_response' && data.agent_response_event?.agent_response) {
+          updateOverlayState('responding', { text: data.agent_response_event.agent_response });
+        }
+        // Echo user transcript back in status bar
+        if (data.type === 'user_transcript' && data.user_transcription_event?.user_transcript) {
+          const st = document.getElementById('rs-status-text');
+          if (st) st.textContent = `You: ${data.user_transcription_event.user_transcript}`;
+        }
+      } catch { /* non-critical */ }
+    };
+
+    elevenLabsWs.onerror = () => { elevenLabsWs = null; };
+    elevenLabsWs.onclose = () => { elevenLabsWs = null; };
+
+  } catch (err) {
+    // Non-fatal — existing voice-command flow still works
+    console.warn('[RS] ElevenLabs agent init failed:', err.message);
+  }
+}
+
+function disconnectElevenLabsAgent() {
+  if (elevenLabsWs) {
+    try { elevenLabsWs.close(); } catch { /* ignore */ }
+    elevenLabsWs = null;
+  }
+}
+
+/**
+ * Called after a screen analysis completes so the ElevenLabs agent
+ * gets an updated, vision-derived description of what is on screen.
+ * @param {string} screenDescription – text returned by the vision pipeline
+ */
+function updateElevenLabsAgentContext(screenDescription) {
+  if (!elevenLabsWs || elevenLabsWs.readyState !== WebSocket.OPEN || !screenDescription) return;
+  try {
+    // ElevenLabs supports injecting contextual data mid-conversation via
+    // a contextual_update message so the agent is immediately aware.
+    elevenLabsWs.send(JSON.stringify({
+      type: 'contextual_update',
+      text: `[Screen update] ${screenDescription}`,
+    }));
+  } catch { /* non-critical */ }
+}
+
+// ── Message listener ──────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message.type) {
     case 'SHOW_OVERLAY':
@@ -33,7 +155,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-// ── Overlay lifecycle ─────────────────────────────────────────────────────────
+// ── Overlay lifecycle ──────────────────────────────────────────────────
 function showOverlay() {
   if (overlayElement) return;
   overlayElement = document.createElement('div');
@@ -42,10 +164,13 @@ function showOverlay() {
   document.body.appendChild(overlayElement);
   setupOverlayListeners();
   initMicrophone();
+  // Connect the ElevenLabs conversational agent with current screen context
+  initElevenLabsAgent();
 }
 
 function hideOverlay() {
   stopRecording();
+  disconnectElevenLabsAgent();
   if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
   if (overlayElement) { overlayElement.remove(); overlayElement = null; }
   chrome.runtime.sendMessage({ type: 'OVERLAY_CLOSED' });
@@ -104,7 +229,7 @@ function setupOverlayListeners() {
   mic?.addEventListener('touchend', e => { e.preventDefault(); stopAndTranscribe(); }, { passive: false });
 }
 
-// ── Microphone / recording ────────────────────────────────────────────
+// ── Microphone / recording ────────────────────────────────────
 async function initMicrophone() {
   try {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -185,6 +310,10 @@ async function analyzeScreen() {
   if (st) st.textContent = 'Analyzing screen...';
   try {
     const response = await chrome.runtime.sendMessage({ type: 'ANALYZE_SCREEN' });
+    // Push the visual description to the ElevenLabs agent so it stays in sync
+    if (response?.responseText) {
+      updateElevenLabsAgentContext(response.responseText);
+    }
     await handleAgentResponse(response);
   } catch (err) {
     updateOverlayState('error', { error: err.message });
