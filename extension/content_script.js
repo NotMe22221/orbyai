@@ -1,11 +1,16 @@
 // Content script for Resident Secretary
-// Handles overlay injection, DOM capture, and browser action execution
+// Voice pipeline: ElevenLabs STT (mic recording) + ElevenLabs TTS (audio playback)
 
 let overlayElement = null;
 let overlayState = 'idle';
 let sessionId = null;
 let currentAction = null;
-let vapiActive = false;
+
+// ─── MediaRecorder for ElevenLabs STT ───────────────────────────────────────
+let mediaRecorder = null;
+let audioChunks = [];
+let isRecording = false;
+let micStream = null;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message.type) {
@@ -37,15 +42,13 @@ function showOverlay() {
   overlayElement.innerHTML = createOverlayHTML();
   document.body.appendChild(overlayElement);
   setupOverlayListeners();
-  requestMicPermission();
+  initMicrophone();
 }
 
 function hideOverlay() {
-  if (overlayElement) {
-    overlayElement.remove();
-    overlayElement = null;
-    overlayState = 'idle';
-  }
+  stopRecording();
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+  if (overlayElement) { overlayElement.remove(); overlayElement = null; }
   chrome.runtime.sendMessage({ type: 'OVERLAY_CLOSED' });
 }
 
@@ -59,8 +62,8 @@ function createOverlayHTML() {
       </div>
       <div class="rs-body">
         <div class="rs-status">
-          <div class="rs-mic-indicator" id="rs-mic-indicator" title="Click to activate voice"></div>
-          <p class="rs-status-text" id="rs-status-text">Click mic to start</p>
+          <div class="rs-mic-indicator" id="rs-mic-indicator" title="Hold to speak"></div>
+          <p class="rs-status-text" id="rs-status-text">Hold mic to speak</p>
         </div>
         <div class="rs-response" id="rs-response" style="display:none">
           <p id="rs-response-text"></p>
@@ -83,17 +86,155 @@ function createOverlayHTML() {
 
 function setupOverlayListeners() {
   document.getElementById('rs-close-btn')?.addEventListener('click', hideOverlay);
-  document.getElementById('rs-mic-indicator')?.addEventListener('click', toggleVoice);
   document.getElementById('rs-send-btn')?.addEventListener('click', sendTextCommand);
-  document.getElementById('rs-text-input')?.addEventListener('keypress', (e) => {
+  document.getElementById('rs-text-input')?.addEventListener('keypress', e => {
     if (e.key === 'Enter') sendTextCommand();
   });
   document.getElementById('rs-approve-btn')?.addEventListener('click', () => approveAction(true));
   document.getElementById('rs-reject-btn')?.addEventListener('click', () => approveAction(false));
+
+  // Push-to-talk: hold mic button
+  const mic = document.getElementById('rs-mic-indicator');
+  mic?.addEventListener('mousedown', startRecording);
+  mic?.addEventListener('mouseup', stopAndTranscribe);
+  mic?.addEventListener('mouseleave', stopAndTranscribe);
+  // Touch support
+  mic?.addEventListener('touchstart', e => { e.preventDefault(); startRecording(); });
+  mic?.addEventListener('touchend', e => { e.preventDefault(); stopAndTranscribe(); });
+}
+
+async function initMicrophone() {
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    updateOverlayState('idle');
+    // Play ElevenLabs greeting
+    await playGreeting();
+  } catch {
+    updateOverlayState('error', { error: 'Microphone permission denied' });
+  }
+}
+
+async function playGreeting() {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'SYNTHESIZE_SPEECH',
+      text: "Hello, I'm your Resident Secretary. I'm ready to help."
+    });
+    if (response?.audioBase64) playAudioBase64(response.audioBase64);
+  } catch { /* non-critical */ }
+}
+
+function startRecording() {
+  if (!micStream || isRecording) return;
+  audioChunks = [];
+  mediaRecorder = new MediaRecorder(micStream, { mimeType: 'audio/webm' });
+  mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+  mediaRecorder.start();
+  isRecording = true;
+  updateOverlayState('listening');
+}
+
+function stopRecording() {
+  if (!isRecording || !mediaRecorder) return;
+  mediaRecorder.stop();
+  isRecording = false;
+}
+
+async function stopAndTranscribe() {
+  if (!isRecording) return;
+  stopRecording();
+  updateOverlayState('processing');
+
+  await new Promise(resolve => setTimeout(resolve, 300)); // let recorder flush
+
+  const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+  if (audioBlob.size < 1000) { updateOverlayState('idle'); return; } // too short
+
+  try {
+    // Send audio to backend for ElevenLabs STT transcription
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    const base64Audio = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+
+    const response = await chrome.runtime.sendMessage({
+      type: 'VOICE_COMMAND',
+      payload: { audioBase64: base64Audio, mimeType: 'audio/webm', vapiRecording: null }
+    });
+    await handleAgentResponse(response);
+  } catch (err) {
+    updateOverlayState('error', { error: err.message });
+  }
+}
+
+async function sendTextCommand() {
+  const input = document.getElementById('rs-text-input');
+  const text = input?.value?.trim();
+  if (!text) return;
+  input.value = '';
+  updateOverlayState('processing');
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'VOICE_COMMAND',
+      payload: { transcript: text, vapiRecording: null }
+    });
+    await handleAgentResponse(response);
+  } catch (err) {
+    updateOverlayState('error', { error: err.message });
+  }
+}
+
+async function handleAgentResponse(response) {
+  if (response?.error) { updateOverlayState('error', { error: response.error }); return; }
+  // Play TTS response via ElevenLabs
+  if (response?.responseText) {
+    try {
+      const tts = await chrome.runtime.sendMessage({
+        type: 'SYNTHESIZE_SPEECH',
+        text: response.responseText
+      });
+      if (tts?.audioBase64) playAudioBase64(tts.audioBase64);
+    } catch { /* non-critical */ }
+  }
+  if (response?.requiresApproval) {
+    currentAction = response.action;
+    updateOverlayState('action_pending', { description: response.actionDescription });
+  } else if (response?.action) {
+    updateOverlayState('processing');
+    await executeBrowserAction(response.action);
+    updateOverlayState('result', { text: response.responseText });
+  } else {
+    updateOverlayState('responding', { text: response.responseText });
+  }
+}
+
+function playAudioBase64(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const blob = new Blob([bytes], { type: 'audio/mpeg' });
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+  audio.onended = () => URL.revokeObjectURL(url);
+  audio.play().catch(() => {});
+}
+
+async function approveAction(approved) {
+  const approvalBanner = document.getElementById('rs-approval-banner');
+  if (approvalBanner) approvalBanner.style.display = 'none';
+  if (approved && currentAction) {
+    updateOverlayState('processing');
+    try {
+      await executeBrowserAction(currentAction);
+      updateOverlayState('result', { text: 'Action completed successfully' });
+    } catch (err) {
+      updateOverlayState('error', { error: err.message });
+    }
+  } else {
+    updateOverlayState('idle');
+  }
+  currentAction = null;
 }
 
 function updateOverlayState(state, data = {}) {
-  overlayState = state;
   const statusText = document.getElementById('rs-status-text');
   const micIndicator = document.getElementById('rs-mic-indicator');
   const responseDiv = document.getElementById('rs-response');
@@ -103,15 +244,9 @@ function updateOverlayState(state, data = {}) {
   micIndicator?.classList.remove('listening', 'processing', 'responding', 'error');
 
   const states = {
-    idle: () => { if (statusText) statusText.textContent = 'Click mic to start'; },
-    listening: () => {
-      if (statusText) statusText.textContent = 'Listening...';
-      micIndicator?.classList.add('listening');
-    },
-    processing: () => {
-      if (statusText) statusText.textContent = 'Processing...';
-      micIndicator?.classList.add('processing');
-    },
+    idle: () => { if (statusText) statusText.textContent = 'Hold mic to speak'; },
+    listening: () => { if (statusText) statusText.textContent = 'Listening...'; micIndicator?.classList.add('listening'); },
+    processing: () => { if (statusText) statusText.textContent = 'Processing...'; micIndicator?.classList.add('processing'); },
     responding: () => {
       if (statusText) statusText.textContent = 'Responding...';
       micIndicator?.classList.add('responding');
@@ -137,78 +272,7 @@ function updateOverlayState(state, data = {}) {
       if (responseText) responseText.textContent = data.error || 'Something went wrong';
     }
   };
-
   states[state]?.();
-}
-
-async function requestMicPermission() {
-  try {
-    await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch {
-    updateOverlayState('error', { error: 'Microphone permission denied' });
-  }
-}
-
-async function toggleVoice() {
-  if (!vapiActive) {
-    updateOverlayState('listening');
-    vapiActive = true;
-    // TODO: Initialize Vapi WebRTC session
-  } else {
-    vapiActive = false;
-    updateOverlayState('idle');
-  }
-}
-
-async function sendTextCommand() {
-  const input = document.getElementById('rs-text-input');
-  const text = input?.value?.trim();
-  if (!text) return;
-  input.value = '';
-  updateOverlayState('processing');
-  try {
-    const response = await chrome.runtime.sendMessage({
-      type: 'VOICE_COMMAND',
-      payload: { transcript: text, vapiRecording: null }
-    });
-    await handleAgentResponse(response);
-  } catch (err) {
-    updateOverlayState('error', { error: err.message });
-  }
-}
-
-async function handleAgentResponse(response) {
-  if (response.error) {
-    updateOverlayState('error', { error: response.error });
-    return;
-  }
-  if (response.requiresApproval) {
-    currentAction = response.action;
-    updateOverlayState('action_pending', { description: response.actionDescription });
-  } else if (response.action) {
-    updateOverlayState('processing');
-    await executeBrowserAction(response.action);
-    updateOverlayState('result', { text: response.responseText });
-  } else {
-    updateOverlayState('responding', { text: response.responseText });
-  }
-}
-
-async function approveAction(approved) {
-  const approvalBanner = document.getElementById('rs-approval-banner');
-  if (approvalBanner) approvalBanner.style.display = 'none';
-  if (approved && currentAction) {
-    updateOverlayState('processing');
-    try {
-      await executeBrowserAction(currentAction);
-      updateOverlayState('result', { text: 'Action completed successfully' });
-    } catch (err) {
-      updateOverlayState('error', { error: err.message });
-    }
-  } else {
-    updateOverlayState('idle');
-  }
-  currentAction = null;
 }
 
 async function executeBrowserAction(action) {
@@ -216,8 +280,7 @@ async function executeBrowserAction(action) {
     case 'fill_field': {
       const el = document.querySelector(action.selector);
       if (!el) throw new Error(`Element not found: ${action.selector}`);
-      el.focus();
-      el.value = action.value;
+      el.focus(); el.value = action.value;
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return { success: true };
@@ -225,33 +288,23 @@ async function executeBrowserAction(action) {
     case 'click': {
       const el = document.querySelector(action.selector);
       if (!el) throw new Error(`Element not found: ${action.selector}`);
-      el.click();
-      return { success: true };
+      el.click(); return { success: true };
     }
     case 'copy_clipboard':
       await navigator.clipboard.writeText(action.text);
       return { success: true };
     case 'inject_overlay': {
-      const container = document.createElement('div');
-      container.id = 'rs-injected-overlay';
-      container.innerHTML = action.html;
-      document.body.appendChild(container);
-      return { success: true };
+      const c = document.createElement('div');
+      c.id = 'rs-injected-overlay'; c.innerHTML = action.html;
+      document.body.appendChild(c); return { success: true };
     }
-    case 'navigate':
-      window.location.href = action.url;
-      return { success: true };
-    case 'open_tab':
-      window.open(action.url, '_blank');
-      return { success: true };
+    case 'navigate': window.location.href = action.url; return { success: true };
+    case 'open_tab': window.open(action.url, '_blank'); return { success: true };
     case 'scroll_to':
-      if (action.selector) {
-        document.querySelector(action.selector)?.scrollIntoView({ behavior: 'smooth' });
-      } else {
-        window.scrollTo({ top: action.y || 0, left: action.x || 0, behavior: 'smooth' });
-      }
+      action.selector
+        ? document.querySelector(action.selector)?.scrollIntoView({ behavior: 'smooth' })
+        : window.scrollTo({ top: action.y || 0, left: action.x || 0, behavior: 'smooth' });
       return { success: true };
-    default:
-      throw new Error(`Unknown action type: ${action.type}`);
+    default: throw new Error(`Unknown action type: ${action.type}`);
   }
 }

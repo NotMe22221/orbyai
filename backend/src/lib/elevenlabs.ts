@@ -1,7 +1,10 @@
-// ElevenLabs TTS integration
-// TASK-1052: Voice synthesis for agent responses
+// ElevenLabs — Full Voice Pipeline (STT + TTS)
+// Replaces Vapi. Handles both speech input and voice output.
+// TASK-1051 + TASK-1052
 
 const ELEVENLABS_API_URL = 'https://api.elevenlabs.io/v1';
+
+// ─── TTS ────────────────────────────────────────────────────────────────────
 
 export interface TTSOptions {
   text: string;
@@ -37,7 +40,7 @@ export async function synthesizeSpeech(options: TTSOptions): Promise<ArrayBuffer
 
   if (!response.ok) {
     const err = await response.text();
-    throw new Error(`ElevenLabs error ${response.status}: ${err}`);
+    throw new Error(`ElevenLabs TTS error ${response.status}: ${err}`);
   }
 
   return await response.arrayBuffer();
@@ -51,5 +54,70 @@ export async function synthesizeSpeechBase64(options: TTSOptions): Promise<strin
   return btoa(binary);
 }
 
-// Greeting played on extension activation
-export const GREETING_TEXT = "Hello, I'm your Resident Secretary. I'm ready to help you with any task on this page.";
+// ─── STT ────────────────────────────────────────────────────────────────────
+// ElevenLabs Speech-to-Text API
+
+export interface STTOptions {
+  audioBlob: Blob;
+  modelId?: string;
+  languageCode?: string;
+}
+
+export interface STTResult {
+  transcript: string;
+  confidence?: number;
+  recordingId: string;
+}
+
+export async function transcribeSpeech(options: STTOptions): Promise<STTResult> {
+  const apiKey = process.env.ELEVENLABS_API_KEY;
+  if (!apiKey) throw new Error('ELEVENLABS_API_KEY not set');
+
+  const formData = new FormData();
+  formData.append('file', options.audioBlob, 'recording.webm');
+  formData.append('model_id', options.modelId ?? 'scribe_v1');
+  if (options.languageCode) formData.append('language_code', options.languageCode);
+
+  const response = await fetch(`${ELEVENLABS_API_URL}/speech-to-text`, {
+    method: 'POST',
+    headers: { 'xi-api-key': apiKey },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`ElevenLabs STT error ${response.status}: ${err}`);
+  }
+
+  const data = await response.json();
+  const recordingId = `el_rec_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+
+  return {
+    transcript: data.text ?? '',
+    confidence: data.confidence,
+    recordingId,
+  };
+}
+
+// ─── RECORDING CHAIN ────────────────────────────────────────────────────────
+// Critical: recording must be forwarded through Agent A → Agent B → Browser Action
+
+export function buildRecordingChainItem(
+  transcript: string,
+  recordingId: string,
+  pageContext: { url: string; pageType: string }
+) {
+  return {
+    source: 'elevenlabs',
+    transcript,
+    recordingId,
+    pageContext,
+    timestamp: new Date().toISOString(),
+    chainId: `chain_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+  };
+}
+
+// ─── GREETING ───────────────────────────────────────────────────────────────
+
+export const GREETING_TEXT =
+  "Hello, I'm your Resident Secretary. I'm ready to help you with any task on this page.";
