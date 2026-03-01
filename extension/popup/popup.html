@@ -4,19 +4,88 @@
   <meta charset="UTF-8" />
   <title>Resident Secretary</title>
   <style>
-    body { width: 280px; min-height: 160px; margin: 0; padding: 16px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f0f19; color: white; }
-    h2 { font-size: 15px; margin: 0 0 6px; color: rgba(255,255,255,0.9); }
-    p { font-size: 12px; color: rgba(255,255,255,0.45); margin: 0 0 16px; }
-    .shortcut { background: rgba(99,102,241,0.12); border: 1px solid rgba(99,102,241,0.28); border-radius: 8px; padding: 10px 14px; font-size: 13px; color: rgba(255,255,255,0.75); text-align: center; }
-    kbd { background: rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 6px; font-size: 11px; font-family: monospace; }
-    .status { margin-top: 10px; font-size: 11px; color: rgba(255,255,255,0.3); text-align: center; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 290px;
+      background: #0a0a14;
+      color: #e2e8f0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    .header {
+      display: flex; align-items: center; gap: 10px;
+      padding: 14px 16px 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+      background: rgba(255,255,255,0.02);
+    }
+    .logo {
+      width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
+      background: linear-gradient(135deg, #818cf8, #22d3a6);
+      display: flex; align-items: center; justify-content: center; font-size: 17px;
+    }
+    .header h1 { font-size: 13px; font-weight: 700; color: rgba(255,255,255,0.9); }
+    .header p  { font-size: 10px; color: rgba(255,255,255,0.32); margin-top: 2px; }
+    .body { padding: 14px 16px; display: flex; flex-direction: column; gap: 11px; }
+    .page-badge {
+      display: flex; align-items: center; gap: 7px; padding: 7px 10px;
+      background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 8px; font-size: 11px;
+    }
+    .dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background: #22d3a6; }
+    .dot.off { background: #ef4444; }
+    #page-name { color: rgba(255,255,255,0.6); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+    .activate-btn {
+      width: 100%; padding: 11px 14px;
+      background: linear-gradient(135deg, #6366f1, #4f46e5);
+      color: #fff; border: none; border-radius: 10px;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+      font-family: inherit; display: flex; align-items: center;
+      justify-content: center; gap: 8px; transition: all 0.18s;
+      letter-spacing: -0.01em;
+    }
+    .activate-btn:hover:not(:disabled) {
+      background: linear-gradient(135deg, #818cf8, #6366f1);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 18px rgba(99,102,241,0.45);
+    }
+    .activate-btn:active:not(:disabled) { transform: translateY(0); }
+    .activate-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .activate-btn.close-mode { background: linear-gradient(135deg, #ef4444, #dc2626); }
+    .activate-btn.close-mode:hover:not(:disabled) { background: linear-gradient(135deg, #f87171, #ef4444); box-shadow: 0 4px 18px rgba(239,68,68,0.4); }
+    .hint { text-align: center; font-size: 10.5px; color: rgba(255,255,255,0.22); }
+    kbd {
+      display: inline-block; background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.1); border-radius: 4px;
+      padding: 1px 6px; font-size: 10px; font-family: monospace;
+      color: rgba(255,255,255,0.45);
+    }
+    #status-msg {
+      font-size: 10.5px; text-align: center; line-height: 1.5;
+      color: rgba(255,255,255,0.3); display: none;
+    }
+    #status-msg.error { color: #f87171; display: block; }
+    #status-msg.info  { color: #22d3a6;  display: block; }
   </style>
 </head>
 <body>
-  <h2>&#x1F916; Resident Secretary</h2>
-  <p>AI-powered browser assistant</p>
-  <div class="shortcut">Press <kbd>Cmd+Shift+Space</kbd> on any page</div>
-  <div class="status" id="status">Ready</div>
+  <div class="header">
+    <div class="logo">&#x1F916;</div>
+    <div>
+      <h1>Resident Secretary</h1>
+      <p>AI-powered browser assistant v1.2</p>
+    </div>
+  </div>
+  <div class="body">
+    <div class="page-badge">
+      <div class="dot" id="page-dot"></div>
+      <span id="page-name">Detecting page&#x2026;</span>
+    </div>
+    <button class="activate-btn" id="activate-btn" disabled>
+      <span id="btn-icon">&#x26A1;</span>
+      <span id="btn-text">Activate on this page</span>
+    </button>
+    <p class="hint">Or press <kbd>&#x2318;&#x21E7;Space</kbd> on any page</p>
+    <p id="status-msg"></p>
+  </div>
   <script src="popup.js"></script>
 </body>
 </html>
