@@ -11,7 +11,9 @@ export async function getAccessToken(): Promise<string> {
       client_secret: process.env.CLIENT_SECRET || '',
     }),
   });
+  if (!res.ok) throw new Error(`Auth failed: ${res.status}`);
   const data = await res.json();
+  if (!data.access_token) throw new Error('No access_token in auth response');
   return data.access_token;
 }
 
@@ -54,8 +56,35 @@ export async function sendMessage(
   return data.content?.[0]?.value || '';
 }
 
+// One-shot: creates a fresh chat per call (used by AgentA / AgentB)
 export async function callDeployAI(prompt: string): Promise<string> {
   const token = await getAccessToken();
   const chatId = await createChat(token);
   return await sendMessage(token, chatId, prompt);
+}
+
+/**
+ * Session-aware: creates or reuses a persistent DeployAI chat thread.
+ * Pass existingChatId to continue a conversation; omit to start fresh.
+ * When starting fresh, supply systemPrompt to establish context before
+ * the first real user message.
+ */
+export async function callDeployAIInSession(
+  message: string,
+  existingChatId?: string,
+  systemPrompt?: string
+): Promise<{ response: string; chatId: string }> {
+  const token = await getAccessToken();
+  let chatId = existingChatId;
+
+  if (!chatId) {
+    chatId = await createChat(token);
+    if (systemPrompt) {
+      // Prime the conversation — response is intentionally discarded
+      await sendMessage(token, chatId, systemPrompt);
+    }
+  }
+
+  const response = await sendMessage(token, chatId, message);
+  return { response, chatId };
 }

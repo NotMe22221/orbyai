@@ -1,312 +1,528 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
+
+// ── Design tokens ─────────────────────────────────────────────────────────────
+const C = {
+  bg: '#0a0a0f',
+  surface: 'rgba(255,255,255,0.04)',
+  border: 'rgba(255,255,255,0.08)',
+  text: '#e2e8f0',
+  muted: 'rgba(255,255,255,0.4)',
+  dim: 'rgba(255,255,255,0.22)',
+  accent: '#818cf8',
+  green: '#22d3a6',
+  pink: '#f472b6',
+  yellow: '#fbbf24',
+  blue: '#60a5fa',
+  red: '#ef4444',
+} as const;
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  type: 'chat' | 'task';
+  action?: Record<string, string | undefined>;
+  requiresApproval?: boolean;
+  actionDescription?: string;
+  timestamp: number;
+}
+
+interface HealthEnv {
+  elevenlabs: boolean;
+  elevenlabsAgent: boolean;
+  deployAI: boolean;
+  supabase: boolean;
+  mocks: boolean;
+}
 
 interface HealthData {
   status: string;
-  service: string;
-  timestamp: string;
-  env: {
-    elevenlabs: boolean;
-    elevenlabsAgent: boolean;
-    deployAI: boolean;
-    supabase: boolean;
-    mocks: boolean;
-  };
+  env: HealthEnv;
 }
 
-export default function Dashboard() {
-  const [health, setHealth] = useState<HealthData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [lastUpdated, setLastUpdated] = useState<string>('');
-
-  const fetchHealth = async () => {
-    try {
-      const res = await fetch('/api/health');
-      const data = await res.json();
-      setHealth(data);
-      setLastUpdated(new Date().toLocaleTimeString());
-    } catch {
-      setHealth(null);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    fetchHealth();
-    const interval = setInterval(fetchHealth, 30000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const StatusDot = ({ active }: { active: boolean }) => (
+// ── StatusDot ─────────────────────────────────────────────────────────────────
+function StatusDot({ active }: { active: boolean }) {
+  return (
     <span style={{
-      display: 'inline-block',
-      width: 10,
-      height: 10,
-      borderRadius: '50%',
-      background: active ? '#22d3a6' : '#ef4444',
-      boxShadow: active ? '0 0 8px #22d3a6aa' : '0 0 8px #ef4444aa',
-      marginRight: 8,
-      flexShrink: 0,
+      display: 'inline-block', width: 7, height: 7,
+      borderRadius: '50%', flexShrink: 0,
+      background: active ? C.green : C.red,
+      boxShadow: active ? `0 0 5px ${C.green}88` : `0 0 5px ${C.red}88`,
     }} />
   );
+}
 
-  const Card = ({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) => (
+// ── ActionCard ────────────────────────────────────────────────────────────────
+function ActionCard({
+  action, description, requiresApproval,
+}: {
+  action: Record<string, string | undefined>;
+  description?: string;
+  requiresApproval?: boolean;
+}) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard.writeText(JSON.stringify(action, null, 2))
+      .then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); });
+  };
+  return (
     <div style={{
-      background: 'rgba(255,255,255,0.04)',
-      border: '1px solid rgba(255,255,255,0.08)',
-      borderRadius: 16,
-      padding: '1.5rem',
-      backdropFilter: 'blur(12px)',
-      ...style,
+      padding: '10px 12px',
+      background: 'rgba(34,211,166,0.05)',
+      border: '1px solid rgba(34,211,166,0.2)',
+      borderRadius: 10, fontSize: '0.8rem',
     }}>
-      {children}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 5, color: C.green, fontWeight: 600 }}>
+          <span>⚡</span>
+          <span>action: {action.type}</span>
+        </div>
+        <button
+          onClick={copy}
+          style={{
+            background: 'none', border: `1px solid ${C.border}`,
+            borderRadius: 5, padding: '2px 8px',
+            fontSize: '0.63rem', color: copied ? C.green : C.dim,
+            cursor: 'pointer', fontFamily: 'inherit', transition: 'all 0.15s',
+          }}
+        >
+          {copied ? '✓ copied' : 'copy json'}
+        </button>
+      </div>
+      {description && (
+        <div style={{ color: C.muted, marginBottom: 8, fontSize: '0.73rem', lineHeight: 1.5 }}>
+          {description}
+        </div>
+      )}
+      <div style={{
+        background: 'rgba(0,0,0,0.35)', borderRadius: 6,
+        padding: '8px 10px', fontFamily: 'monospace',
+        fontSize: '0.71rem', color: '#94a3b8', lineHeight: 1.75,
+      }}>
+        {Object.entries(action)
+          .filter(([, v]) => v !== undefined && v !== '')
+          .map(([k, v]) => (
+            <div key={k}>
+              <span style={{ color: C.accent }}>{k}</span>
+              <span style={{ color: C.dim }}>: </span>
+              <span style={{ color: C.green }}>{v}</span>
+            </div>
+          ))}
+      </div>
+      <div style={{ marginTop: 8, fontSize: '0.68rem', display: 'flex', alignItems: 'center', gap: 5 }}>
+        {requiresApproval ? (
+          <span style={{ color: C.yellow }}>⚠️ Requires approval before executing in extension</span>
+        ) : (
+          <span style={{ color: C.green }}>✓ Safe to auto-execute</span>
+        )}
+      </div>
     </div>
   );
+}
 
-  const endpoints = [
-    { method: 'POST', path: '/api/voice', desc: 'Main pipeline — Coordinator → AgentA → AgentB → Safety Gate' },
-    { method: 'POST', path: '/api/transcribe', desc: 'ElevenLabs STT — audio → transcript' },
-    { method: 'POST', path: '/api/tts', desc: 'ElevenLabs TTS — text → audio stream' },
-    { method: 'GET',  path: '/api/agent-url', desc: 'Signed WebSocket URL for Conversational Agent' },
-    { method: 'GET',  path: '/api/stream', desc: 'SSE real-time status updates' },
-    { method: 'GET',  path: '/api/health', desc: 'Health check + env status' },
+// ── MessageBubble ─────────────────────────────────────────────────────────────
+function MessageBubble({ message }: { message: ChatMessage }) {
+  const isUser = message.role === 'user';
+  return (
+    <div style={{
+      display: 'flex',
+      justifyContent: isUser ? 'flex-end' : 'flex-start',
+      gap: 8, alignItems: 'flex-start',
+    }}>
+      {!isUser && (
+        <div style={{
+          width: 28, height: 28, borderRadius: 8, flexShrink: 0, marginTop: 2,
+          background: 'linear-gradient(135deg, #818cf8, #22d3a6)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14,
+        }}>🤖</div>
+      )}
+      <div style={{ maxWidth: '68%', display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div style={{
+          padding: '10px 14px', lineHeight: 1.65, fontSize: '0.875rem',
+          background: isUser
+            ? 'linear-gradient(135deg, rgba(129,140,248,0.2), rgba(129,140,248,0.1))'
+            : C.surface,
+          border: `1px solid ${isUser ? 'rgba(129,140,248,0.3)' : C.border}`,
+          borderRadius: isUser ? '12px 12px 4px 12px' : '12px 12px 12px 4px',
+          color: C.text,
+        }}>
+          {!isUser && message.type === 'task' && (
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+              background: 'rgba(34,211,166,0.1)', border: '1px solid rgba(34,211,166,0.2)',
+              borderRadius: 4, padding: '1px 7px',
+              fontSize: '0.63rem', color: C.green,
+              marginBottom: 6, marginRight: 6,
+            }}>⚡ task</span>
+          )}
+          {message.content}
+        </div>
+        {message.type === 'task' && message.action && (
+          <ActionCard
+            action={message.action}
+            description={message.actionDescription}
+            requiresApproval={message.requiresApproval}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Dashboard ────────────────────────────────────────────────────────────────
+export default function Dashboard() {
+  const [health, setHealth] = useState<HealthData | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    {
+      id: 'welcome',
+      role: 'assistant',
+      content: "Hey! I'm Orby. Ask me anything — or tell me what to do and I'll do it.",
+      type: 'chat',
+      timestamp: Date.now(),
+    },
+  ]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [chatId, setChatId] = useState<string | undefined>();
+  const [sessionId] = useState(() => `dashboard-${Date.now()}`);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Health polling
+  useEffect(() => {
+    const poll = () =>
+      fetch('/api/health').then(r => r.json()).then(setHealth).catch(() => {});
+    poll();
+    const id = setInterval(poll, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Scroll to bottom on new messages
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, loading]);
+
+  const addMsg = useCallback((msg: Omit<ChatMessage, 'id' | 'timestamp'>) => {
+    setMessages(p => [
+      ...p,
+      {
+        ...msg,
+        id: `${msg.role}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        timestamp: Date.now(),
+      },
+    ]);
+  }, []);
+
+  const sendMessage = useCallback(async (override?: string) => {
+    const text = (override ?? input).trim();
+    if (!text || loading) return;
+    if (!override) setInput('');
+
+    addMsg({ role: 'user', content: text, type: 'chat' });
+    setLoading(true);
+
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text, sessionId, chatId }),
+      });
+      const data = await res.json();
+      if (data.chatId) setChatId(data.chatId);
+
+      addMsg({
+        role: 'assistant',
+        content: data.response || data.error || 'Something went wrong.',
+        type: data.type || 'chat',
+        action: data.action,
+        requiresApproval: data.requiresApproval,
+        actionDescription: data.actionDescription,
+      });
+    } catch {
+      addMsg({ role: 'assistant', content: 'Connection error. Please try again.', type: 'chat' });
+    } finally {
+      setLoading(false);
+      setTimeout(() => inputRef.current?.focus(), 50);
+    }
+  }, [input, loading, sessionId, chatId, addMsg]);
+
+  // ── Static data ─────────────────────────────────────────────────────────
+  const services: { key: keyof HealthEnv; label: string; icon: string }[] = [
+    { key: 'deployAI', label: 'Deploy AI', icon: '🧠' },
+    { key: 'elevenlabs', label: 'ElevenLabs', icon: '🎙️' },
+    { key: 'supabase', label: 'Supabase', icon: '🗄️' },
+    { key: 'mocks', label: 'Mocks', icon: '🧪' },
   ];
 
   const pipeline = [
-    { name: 'Coordinator', color: '#818cf8', desc: 'Deterministic router <10ms' },
-    { name: 'Agent A', color: '#34d399', desc: 'Voice Concierge — intent classification' },
-    { name: 'Agent B', color: '#f472b6', desc: 'Workspace Executor — action payloads' },
-    { name: 'Safety Gate', color: '#fbbf24', desc: 'Rule-based approval layer' },
-    { name: 'Browser Action', color: '#60a5fa', desc: 'Chrome API execution' },
+    { name: 'Coordinator', color: C.accent, desc: '< 10ms routing' },
+    { name: 'Agent A', color: C.green, desc: 'Intent classifier' },
+    { name: 'Agent B', color: C.pink, desc: 'Action executor' },
+    { name: 'Safety Gate', color: C.yellow, desc: 'Approval layer' },
   ];
 
-  const uiStates = ['idle', 'listening', 'processing', 'responding', 'action_pending', 'result', 'error'];
-  const stateColors: Record<string, string> = {
-    idle: '#475569', listening: '#22d3a6', processing: '#818cf8',
-    responding: '#34d399', action_pending: '#fbbf24', result: '#60a5fa', error: '#ef4444',
-  };
+  const suggestions = [
+    'What can you do?',
+    'Navigate to github.com',
+    'Fill the first input with "Hello World"',
+    'Click the submit button',
+  ];
 
+  const isOnlyWelcome = messages.length === 1;
+
+  // ── Render ───────────────────────────────────────────────────────────────
   return (
     <div style={{
       fontFamily: "'Inter', system-ui, sans-serif",
-      background: '#0a0a0f',
-      color: '#e2e8f0',
-      minHeight: '100vh',
-      padding: '0',
+      background: C.bg, color: C.text,
+      height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden',
     }}>
-      {/* Header */}
+
+      {/* ── Header ──────────────────────────────────────────────────────── */}
       <header style={{
         background: 'rgba(255,255,255,0.02)',
-        borderBottom: '1px solid rgba(255,255,255,0.06)',
-        padding: '1rem 2rem',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        backdropFilter: 'blur(12px)',
-        position: 'sticky',
-        top: 0,
-        zIndex: 100,
+        borderBottom: `1px solid ${C.border}`,
+        padding: '0.6rem 1.25rem',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        flexShrink: 0,
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
           <div style={{
-            width: 36, height: 36, borderRadius: 10,
+            width: 30, height: 30, borderRadius: 8,
             background: 'linear-gradient(135deg, #818cf8, #22d3a6)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 18,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 15,
           }}>🤖</div>
           <div>
-            <div style={{ fontWeight: 700, fontSize: '1rem', letterSpacing: '-0.02em' }}>OrbyAI</div>
-            <div style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.3)', marginTop: -2 }}>Resident Secretary Backend</div>
+            <div style={{ fontWeight: 700, fontSize: '0.875rem', letterSpacing: '-0.02em' }}>OrbyAI</div>
+            <div style={{ fontSize: '0.63rem', color: C.muted }}>Resident Secretary</div>
           </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1.5rem' }}>
-          {lastUpdated && (
-            <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.3)' }}>
-              Updated {lastUpdated}
-            </span>
-          )}
+
+        <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
+          {services.map(({ key, label, icon }) => (
+            <div key={key} title={label} style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              background: C.surface, border: `1px solid ${C.border}`,
+              borderRadius: 20, padding: '3px 9px', fontSize: '0.68rem',
+            }}>
+              <span style={{ fontSize: '0.78rem' }}>{icon}</span>
+              <StatusDot active={health?.env[key] ?? false} />
+              <span style={{ color: C.muted }}>{label}</span>
+            </div>
+          ))}
           <div style={{
-            display: 'flex', alignItems: 'center', gap: 6,
-            background: 'rgba(34,211,166,0.1)', border: '1px solid rgba(34,211,166,0.2)',
-            borderRadius: 20, padding: '4px 12px', fontSize: '0.75rem', color: '#22d3a6',
+            display: 'flex', alignItems: 'center', gap: 5,
+            background: health?.status === 'ok' ? 'rgba(34,211,166,0.08)' : 'rgba(239,68,68,0.08)',
+            border: `1px solid ${health?.status === 'ok' ? 'rgba(34,211,166,0.2)' : 'rgba(239,68,68,0.2)'}`,
+            borderRadius: 20, padding: '3px 9px', fontSize: '0.68rem',
           }}>
             <StatusDot active={health?.status === 'ok'} />
-            {loading ? 'Checking...' : health?.status === 'ok' ? 'All Systems Operational' : 'Degraded'}
+            <span style={{ color: health?.status === 'ok' ? C.green : C.red }}>
+              {health ? (health.status === 'ok' ? 'Live' : 'Offline') : '...'}
+            </span>
           </div>
         </div>
       </header>
 
-      <main style={{ maxWidth: 1200, margin: '0 auto', padding: '2rem' }}>
+      {/* ── Body ────────────────────────────────────────────────────────── */}
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
 
-        {/* Service Health Grid */}
-        <section style={{ marginBottom: '2rem' }}>
-          <h2 style={{ fontSize: '0.75rem', fontWeight: 600, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '1rem' }}>
-            Service Status
-          </h2>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '1rem' }}>
-            {[
-              { key: 'deployAI', label: 'Deploy AI', icon: '🧠' },
-              { key: 'elevenlabs', label: 'ElevenLabs STT/TTS', icon: '🎙️' },
-              { key: 'elevenlabsAgent', label: 'ElevenLabs Agent', icon: '🔊' },
-              { key: 'supabase', label: 'Supabase DB', icon: '🗄️' },
-              { key: 'mocks', label: 'Mock Mode', icon: '🧪' },
-            ].map(({ key, label, icon }) => {
-              const active = health?.env[key as keyof typeof health.env] ?? false;
-              return (
-                <Card key={key}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                    <span style={{ fontSize: '1.25rem' }}>{icon}</span>
-                    <StatusDot active={active} />
-                  </div>
-                  <div style={{ fontSize: '0.875rem', fontWeight: 600 }}>{label}</div>
-                  <div style={{ fontSize: '0.75rem', color: active ? '#22d3a6' : '#ef4444', marginTop: 4 }}>
-                    {key === 'mocks' ? (active ? 'Enabled' : 'Disabled') : active ? 'Connected' : 'Not configured'}
-                  </div>
-                </Card>
-              );
-            })}
-          </div>
-        </section>
+        {/* ── Sidebar ─────────────────────────────────────────────────── */}
+        <aside style={{
+          width: 220, flexShrink: 0,
+          borderRight: `1px solid ${C.border}`,
+          overflowY: 'auto', padding: '1rem 0.875rem',
+          display: 'flex', flexDirection: 'column', gap: '1.25rem',
+        }}>
 
-        {/* Pipeline Visualization */}
-        <section style={{ marginBottom: '2rem' }}>
-          <h2 style={{ fontSize: '0.75rem', fontWeight: 600, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '1rem' }}>
-            Agent Pipeline
-          </h2>
-          <Card>
-            <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
-              {/* Mic */}
-              <div style={{ textAlign: 'center' }}>
-                <div style={{
-                  width: 48, height: 48, borderRadius: 12,
-                  background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.5rem',
-                }}>🎤</div>
-                <div style={{ fontSize: '0.65rem', color: 'rgba(255,255,255,0.4)', marginTop: 4 }}>Voice</div>
-              </div>
-              <div style={{ color: 'rgba(255,255,255,0.2)', fontSize: '1.2rem' }}>→</div>
-              {pipeline.map((step, i) => (
-                <div key={step.name} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <div style={{ textAlign: 'center' }}>
-                    <div style={{
-                      padding: '8px 14px', borderRadius: 10,
-                      background: `${step.color}18`,
-                      border: `1px solid ${step.color}44`,
-                      fontSize: '0.8rem', fontWeight: 600, color: step.color,
-                      whiteSpace: 'nowrap',
-                    }}>
-                      {step.name}
+          {/* Pipeline */}
+          <div>
+            <div style={{
+              fontSize: '0.58rem', fontWeight: 700, color: C.dim,
+              textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '0.5rem',
+            }}>Pipeline</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              {pipeline.map((step, i, arr) => (
+                <div key={step.name}>
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 7,
+                    padding: '5px 8px', borderRadius: 7,
+                    background: `${step.color}10`, border: `1px solid ${step.color}22`,
+                  }}>
+                    <div style={{ width: 5, height: 5, borderRadius: '50%', background: step.color, flexShrink: 0 }} />
+                    <div>
+                      <div style={{ fontSize: '0.72rem', fontWeight: 600, color: step.color }}>{step.name}</div>
+                      <div style={{ fontSize: '0.58rem', color: C.dim }}>{step.desc}</div>
                     </div>
-                    <div style={{ fontSize: '0.6rem', color: 'rgba(255,255,255,0.3)', marginTop: 4, maxWidth: 100 }}>{step.desc}</div>
                   </div>
-                  {i < pipeline.length - 1 && (
-                    <div style={{ color: 'rgba(255,255,255,0.2)', fontSize: '1.2rem' }}>→</div>
+                  {i < arr.length - 1 && (
+                    <div style={{ width: 1, height: 6, background: C.border, marginLeft: 13 }} />
                   )}
                 </div>
               ))}
             </div>
-          </Card>
-        </section>
+          </div>
 
-        {/* Bottom Grid: Endpoints + UI States */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1.5rem' }}>
-
-          {/* API Endpoints */}
-          <section>
-            <h2 style={{ fontSize: '0.75rem', fontWeight: 600, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '1rem' }}>
-              API Endpoints
-            </h2>
-            <Card style={{ padding: '1rem' }}>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                {endpoints.map(({ method, path, desc }) => (
-                  <div key={path} style={{
-                    display: 'flex', alignItems: 'flex-start', gap: '0.75rem',
-                    padding: '0.6rem 0.75rem', borderRadius: 8,
-                    background: 'rgba(255,255,255,0.03)',
-                    border: '1px solid rgba(255,255,255,0.05)',
-                  }}>
-                    <span style={{
-                      fontSize: '0.65rem', fontWeight: 700,
-                      padding: '2px 6px', borderRadius: 4,
-                      background: method === 'POST' ? 'rgba(129,140,248,0.2)' : 'rgba(34,211,166,0.2)',
-                      color: method === 'POST' ? '#818cf8' : '#22d3a6',
-                      flexShrink: 0, marginTop: 1,
-                    }}>{method}</span>
-                    <div>
-                      <code style={{ fontSize: '0.78rem', color: '#e2e8f0' }}>{path}</code>
-                      <div style={{ fontSize: '0.7rem', color: 'rgba(255,255,255,0.35)', marginTop: 2 }}>{desc}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </Card>
-          </section>
-
-          {/* UI States */}
-          <section>
-            <h2 style={{ fontSize: '0.75rem', fontWeight: 600, color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '1rem' }}>
-              Extension UI States
-            </h2>
-            <Card style={{ padding: '1rem' }}>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-                {uiStates.map((state) => (
-                  <div key={state} style={{
-                    display: 'flex', alignItems: 'center', gap: '0.75rem',
-                    padding: '0.6rem 0.75rem', borderRadius: 8,
-                    background: 'rgba(255,255,255,0.03)',
-                    border: '1px solid rgba(255,255,255,0.05)',
-                  }}>
-                    <span style={{
-                      width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-                      background: stateColors[state],
-                      boxShadow: `0 0 6px ${stateColors[state]}88`,
-                    }} />
-                    <span style={{ fontSize: '0.8rem', fontWeight: 500, color: stateColors[state] }}>
-                      {state}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </Card>
-
-            {/* Hotkey Badge */}
+          {/* Action types */}
+          <div>
             <div style={{
-              marginTop: '1rem', padding: '0.75rem 1rem',
-              background: 'rgba(129,140,248,0.08)', border: '1px solid rgba(129,140,248,0.2)',
-              borderRadius: 12, display: 'flex', alignItems: 'center', gap: '0.75rem',
-            }}>
-              <span style={{ fontSize: '1.2rem' }}>⌨️</span>
-              <div>
-                <div style={{ fontSize: '0.8rem', fontWeight: 600, color: '#818cf8' }}>Extension Hotkey</div>
-                <div style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
-                  <kbd style={{ background: 'rgba(255,255,255,0.1)', padding: '1px 6px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.15)' }}>⌘</kbd>
-                  {' + '}
-                  <kbd style={{ background: 'rgba(255,255,255,0.1)', padding: '1px 6px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.15)' }}>⇧</kbd>
-                  {' + '}
-                  <kbd style={{ background: 'rgba(255,255,255,0.1)', padding: '1px 6px', borderRadius: 4, border: '1px solid rgba(255,255,255,0.15)' }}>Space</kbd>
-                  {' — Toggle overlay'}
+              fontSize: '0.58rem', fontWeight: 700, color: C.dim,
+              textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: '0.5rem',
+            }}>Action Types</div>
+            {['fill_field', 'click', 'navigate', 'open_tab', 'scroll_to', 'copy_clipboard', 'inject_overlay'].map(a => (
+              <div key={a} style={{
+                padding: '3px 0', fontSize: '0.68rem',
+                borderBottom: `1px solid ${C.border}`,
+                fontFamily: 'monospace', color: C.blue,
+              }}>{a}</div>
+            ))}
+          </div>
+
+          {/* Hotkey */}
+          <div style={{
+            padding: '8px', background: C.surface,
+            border: `1px solid ${C.border}`, borderRadius: 8,
+            fontSize: '0.68rem', color: C.muted, lineHeight: 1.7,
+          }}>
+            <div style={{ color: C.accent, fontWeight: 600, marginBottom: 3 }}>Extension Hotkey</div>
+            <kbd style={{
+              background: 'rgba(255,255,255,0.08)', padding: '1px 5px',
+              borderRadius: 3, border: `1px solid ${C.border}`, color: C.text,
+            }}>⌘⇧Space</kbd>
+            {' '}toggles overlay
+          </div>
+        </aside>
+
+        {/* ── Chat ────────────────────────────────────────────────────── */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
+          {/* Messages */}
+          <div style={{
+            flex: 1, overflowY: 'auto',
+            padding: '1.25rem 1.5rem',
+            display: 'flex', flexDirection: 'column', gap: '1rem',
+          }}>
+            {messages.map(msg => <MessageBubble key={msg.id} message={msg} />)}
+
+            {/* Typing indicator */}
+            {loading && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <div style={{
+                  width: 28, height: 28, borderRadius: 8, flexShrink: 0,
+                  background: 'linear-gradient(135deg, #818cf8, #22d3a6)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14,
+                }}>🤖</div>
+                <div style={{
+                  padding: '10px 14px',
+                  background: C.surface, border: `1px solid ${C.border}`,
+                  borderRadius: '12px 12px 12px 4px',
+                  display: 'flex', gap: 4, alignItems: 'center',
+                }}>
+                  {[0, 0.18, 0.36].map((delay, i) => (
+                    <div key={i} style={{
+                      width: 6, height: 6, borderRadius: '50%', background: C.accent,
+                      animation: `orby-bounce 0.9s ease-in-out ${delay}s infinite`,
+                    }} />
+                  ))}
                 </div>
               </div>
+            )}
+            <div ref={bottomRef} />
+          </div>
+
+          {/* Suggestion chips — shown only on empty state */}
+          {isOnlyWelcome && !loading && (
+            <div style={{ padding: '0 1.5rem 0.75rem', display: 'flex', gap: '0.4rem', flexWrap: 'wrap' }}>
+              {suggestions.map(s => (
+                <button
+                  key={s}
+                  onClick={() => sendMessage(s)}
+                  style={{
+                    padding: '5px 12px',
+                    background: C.surface, border: `1px solid ${C.border}`,
+                    borderRadius: 20, fontSize: '0.73rem', color: C.muted,
+                    cursor: 'pointer', fontFamily: 'inherit', transition: 'all 0.15s',
+                  }}
+                  onMouseEnter={e => {
+                    const t = e.currentTarget;
+                    t.style.borderColor = C.accent;
+                    t.style.color = C.text;
+                  }}
+                  onMouseLeave={e => {
+                    const t = e.currentTarget;
+                    t.style.borderColor = C.border;
+                    t.style.color = C.muted;
+                  }}
+                >{s}</button>
+              ))}
             </div>
-          </section>
+          )}
+
+          {/* Input */}
+          <div style={{
+            padding: '0.875rem 1.5rem',
+            borderTop: `1px solid ${C.border}`,
+            background: 'rgba(255,255,255,0.01)',
+            flexShrink: 0,
+          }}>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '0.75rem',
+              background: C.surface, border: `1px solid ${C.border}`,
+              borderRadius: 12, padding: '0.6rem 0.75rem',
+            }}>
+              <input
+                ref={inputRef}
+                type="text"
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+                }}
+                placeholder="Ask something or give a command..."
+                disabled={loading}
+                autoFocus
+                style={{
+                  flex: 1, background: 'none', border: 'none', outline: 'none',
+                  color: C.text, fontSize: '0.875rem', fontFamily: 'inherit',
+                  opacity: loading ? 0.5 : 1,
+                }}
+              />
+              <button
+                onClick={() => sendMessage()}
+                disabled={!input.trim() || loading}
+                style={{
+                  width: 32, height: 32, borderRadius: 8, border: 'none', flexShrink: 0,
+                  background: input.trim() && !loading ? C.accent : 'rgba(255,255,255,0.07)',
+                  color: input.trim() && !loading ? '#fff' : C.muted,
+                  cursor: input.trim() && !loading ? 'pointer' : 'not-allowed',
+                  fontSize: '1.1rem',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  transition: 'all 0.15s', fontFamily: 'inherit',
+                }}
+              >↑</button>
+            </div>
+            <p style={{
+              margin: '0.35rem 0 0', fontSize: '0.62rem',
+              color: C.dim, textAlign: 'center',
+            }}>
+              Orby responds conversationally — tasks execute only when you ask for them
+            </p>
+          </div>
         </div>
+      </div>
 
-        {/* Footer */}
-        <footer style={{
-          marginTop: '2rem', paddingTop: '1.5rem',
-          borderTop: '1px solid rgba(255,255,255,0.06)',
-          display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-        }}>
-          <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.25)' }}>
-            OrbyAI · Resident Secretary v1.0
-          </span>
-          <span style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.25)' }}>
-            Next.js 14 · TypeScript · DeployAI · ElevenLabs · Supabase
-          </span>
-        </footer>
-
-      </main>
+      <style>{`
+        @keyframes orby-bounce {
+          0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
+          40%            { transform: translateY(-5px); opacity: 1; }
+        }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
+        * { box-sizing: border-box; }
+      `}</style>
     </div>
   );
 }
