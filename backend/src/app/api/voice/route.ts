@@ -17,7 +17,8 @@ const VoiceRequestSchema = z.object({
     selectedText: z.string().optional(),
     bodyText: z.string().optional(),
   }),
-  vapiRecording: z.string().nullable().optional(), // carries ElevenLabs recordingId
+  vapiRecording: z.string().nullable().optional(),
+  screenshotBase64: z.string().nullable().optional(), // base64 PNG for vision
 });
 
 export async function POST(req: NextRequest) {
@@ -32,7 +33,11 @@ export async function POST(req: NextRequest) {
     await logAgentAction({
       sessionId: request.sessionId,
       agentName: 'coordinator',
-      input: { transcript: request.transcript, pageType: request.pageContext.pageType },
+      input: {
+        transcript: request.transcript,
+        pageType: request.pageContext.pageType,
+        hasScreenshot: !!request.screenshotBase64,
+      },
       output: {},
       timestamp: new Date().toISOString(),
       durationMs: 0,
@@ -58,24 +63,28 @@ export async function POST(req: NextRequest) {
       } satisfies VoiceResponse);
     }
 
-    // Step 3: Agent B — Workspace Executor (ElevenLabs recordingId chained)
-    const requestWithRecording: VoiceRequest = {
+    // Step 3: Agent B — Workspace Executor (screenshot + recordingId chained)
+    const requestWithContext: VoiceRequest = {
       ...request,
       vapiRecording: agentAResult.vapiRecording ?? request.vapiRecording,
     };
 
     const startB = Date.now();
-    const agentBResult = await runAgentB(requestWithRecording, agentAResult);
+    const agentBResult = await runAgentB(requestWithContext, agentAResult);
     await logAgentAction({
       sessionId: request.sessionId,
       agentName: 'agent_b',
-      input: { intent: agentAResult.intent, recordingChained: !!requestWithRecording.vapiRecording },
+      input: {
+        intent: agentAResult.intent,
+        recordingChained: !!requestWithContext.vapiRecording,
+        hasScreenshot: !!requestWithContext.screenshotBase64,
+      },
       output: agentBResult as unknown as Record<string, unknown>,
       timestamp: new Date().toISOString(),
       durationMs: Date.now() - startB,
     });
 
-    // Step 4: Safety gate — validate + sanitize action before sending to extension
+    // Step 4: Safety gate
     let finalAction = agentBResult.action;
     let requiresApproval = agentBResult.requiresApproval;
     let actionDescription = agentBResult.actionDescription;
@@ -83,13 +92,10 @@ export async function POST(req: NextRequest) {
     if (finalAction) {
       const safetyResult = validateAction(finalAction);
       finalAction = sanitizeAction(finalAction);
-
-      // Safety gate can escalate approval requirement
       if (safetyResult.requiresApproval) requiresApproval = true;
       if (!safetyResult.safe) {
         actionDescription = `⚠️ ${safetyResult.reason}`;
       }
-
       await logAgentAction({
         sessionId: request.sessionId,
         agentName: 'safety_gate',

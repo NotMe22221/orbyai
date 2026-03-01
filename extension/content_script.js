@@ -1,12 +1,13 @@
 // Content script for Resident Secretary
 // Voice pipeline: ElevenLabs STT (mic recording) + ElevenLabs TTS (audio playback)
+// Screen analysis: captures screenshot via background.js + GPT-4o vision
 
 let overlayElement = null;
 let overlayState = 'idle';
 let sessionId = null;
 let currentAction = null;
 
-// ─── MediaRecorder for ElevenLabs STT ───────────────────────────────────────
+// ── MediaRecorder for ElevenLabs STT ───────────────────────────────────────
 let mediaRecorder = null;
 let audioChunks = [];
 let isRecording = false;
@@ -75,6 +76,9 @@ function createOverlayHTML() {
             <button id="rs-reject-btn" class="rs-btn rs-btn-reject">&#x2715; Reject</button>
           </div>
         </div>
+        <div class="rs-action-row">
+          <button id="rs-analyze-btn" class="rs-btn rs-btn-analyze" title="Analyze what&#39;s on screen">&#x1F441; Analyze Screen</button>
+        </div>
         <div class="rs-text-input-area">
           <input type="text" id="rs-text-input" placeholder="Or type a command..." />
           <button id="rs-send-btn" class="rs-btn rs-btn-send">&#x2192;</button>
@@ -87,18 +91,18 @@ function createOverlayHTML() {
 function setupOverlayListeners() {
   document.getElementById('rs-close-btn')?.addEventListener('click', hideOverlay);
   document.getElementById('rs-send-btn')?.addEventListener('click', sendTextCommand);
+  document.getElementById('rs-analyze-btn')?.addEventListener('click', analyzeScreen);
   document.getElementById('rs-text-input')?.addEventListener('keypress', e => {
     if (e.key === 'Enter') sendTextCommand();
   });
   document.getElementById('rs-approve-btn')?.addEventListener('click', () => approveAction(true));
   document.getElementById('rs-reject-btn')?.addEventListener('click', () => approveAction(false));
 
-  // Push-to-talk: hold mic button
+  // Push-to-talk
   const mic = document.getElementById('rs-mic-indicator');
   mic?.addEventListener('mousedown', startRecording);
   mic?.addEventListener('mouseup', stopAndTranscribe);
   mic?.addEventListener('mouseleave', stopAndTranscribe);
-  // Touch support
   mic?.addEventListener('touchstart', e => { e.preventDefault(); startRecording(); });
   mic?.addEventListener('touchend', e => { e.preventDefault(); stopAndTranscribe(); });
 }
@@ -107,7 +111,6 @@ async function initMicrophone() {
   try {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     updateOverlayState('idle');
-    // Play ElevenLabs greeting
     await playGreeting();
   } catch {
     updateOverlayState('error', { error: 'Microphone permission denied' });
@@ -145,18 +148,17 @@ async function stopAndTranscribe() {
   stopRecording();
   updateOverlayState('processing');
 
-  await new Promise(resolve => setTimeout(resolve, 300)); // let recorder flush
+  await new Promise(resolve => setTimeout(resolve, 300));
 
   const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-  if (audioBlob.size < 1000) { updateOverlayState('idle'); return; } // too short
+  if (audioBlob.size < 1000) { updateOverlayState('idle'); return; }
 
   try {
-    // Send audio to backend for ElevenLabs STT transcription
     const arrayBuffer = await audioBlob.arrayBuffer();
     const base64Audio = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-
     const response = await chrome.runtime.sendMessage({
       type: 'VOICE_COMMAND',
+      // background.js auto-captures screenshot before sending to backend
       payload: { audioBase64: base64Audio, mimeType: 'audio/webm', vapiRecording: null }
     });
     await handleAgentResponse(response);
@@ -172,6 +174,7 @@ async function sendTextCommand() {
   input.value = '';
   updateOverlayState('processing');
   try {
+    // background.js auto-captures screenshot before sending to backend
     const response = await chrome.runtime.sendMessage({
       type: 'VOICE_COMMAND',
       payload: { transcript: text, vapiRecording: null }
@@ -182,14 +185,25 @@ async function sendTextCommand() {
   }
 }
 
+// ── Dedicated screen analysis ──────────────────────────────────────────
+async function analyzeScreen() {
+  updateOverlayState('processing');
+  const statusText = document.getElementById('rs-status-text');
+  if (statusText) statusText.textContent = 'Analyzing screen...';
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'ANALYZE_SCREEN' });
+    await handleAgentResponse(response);
+  } catch (err) {
+    updateOverlayState('error', { error: err.message });
+  }
+}
+
 async function handleAgentResponse(response) {
   if (response?.error) { updateOverlayState('error', { error: response.error }); return; }
-  // Play TTS response via ElevenLabs
   if (response?.responseText) {
     try {
       const tts = await chrome.runtime.sendMessage({
-        type: 'SYNTHESIZE_SPEECH',
-        text: response.responseText
+        type: 'SYNTHESIZE_SPEECH', text: response.responseText
       });
       if (tts?.audioBase64) playAudioBase64(tts.audioBase64);
     } catch { /* non-critical */ }

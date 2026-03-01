@@ -1,5 +1,5 @@
 // Service worker for Resident Secretary
-// Voice pipeline: ElevenLabs STT + TTS (Vapi removed)
+// Voice pipeline: ElevenLabs STT + TTS + Screen capture for visual analysis
 
 let currentSessionId = null;
 let overlayActive = false;
@@ -30,6 +30,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(sendResponse).catch(err => sendResponse({ error: err.message }));
     return true;
   }
+  if (message.type === 'ANALYZE_SCREEN') {
+    // Dedicated screen analysis: capture + ask the AI what it sees
+    handleAnalyzeScreen(sender.tab)
+      .then(sendResponse).catch(err => sendResponse({ error: err.message }));
+    return true;
+  }
   if (message.type === 'SYNTHESIZE_SPEECH') {
     synthesizeSpeech(message.text)
       .then(sendResponse).catch(err => sendResponse({ error: err.message }));
@@ -41,8 +47,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
+// ── Screenshot capture ──────────────────────────────────────────────────
+async function captureScreenshot() {
+  try {
+    // captureVisibleTab requires activeTab or <all_urls> permission — both present
+    const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+    // Strip the data URL prefix, return raw base64
+    return dataUrl.replace(/^data:image\/png;base64,/, '');
+  } catch (err) {
+    console.warn('[Screenshot] Capture failed:', err.message);
+    return null;
+  }
+}
+
+// ── Voice command handler (includes auto-screenshot) ─────────────────────
 async function handleVoiceCommand(payload, tab) {
-  // If raw audio sent, transcribe via ElevenLabs STT first
+  // Transcribe audio if needed
   let transcript = payload.transcript;
   let recordingId = null;
 
@@ -54,10 +74,13 @@ async function handleVoiceCommand(payload, tab) {
     });
     const sttData = await sttResult.json();
     transcript = sttData.transcript;
-    recordingId = sttData.recordingId; // chain this through agents
+    recordingId = sttData.recordingId;
   }
 
+  // Capture screenshot for visual context (non-blocking on failure)
+  const screenshotBase64 = await captureScreenshot();
   const context = await getPageContext(tab);
+
   const response = await fetch(`${getBackendUrl()}/api/voice`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -65,13 +88,39 @@ async function handleVoiceCommand(payload, tab) {
       sessionId: currentSessionId,
       transcript,
       pageContext: context,
-      vapiRecording: recordingId // now carries ElevenLabs recording ID
+      vapiRecording: recordingId,
+      screenshotBase64,  // ← GPT-4o will see the screen
     })
   });
   if (!response.ok) throw new Error(`Backend error: ${response.status}`);
   return await response.json();
 }
 
+// ── Dedicated screen analysis ───────────────────────────────────────────
+async function handleAnalyzeScreen(tab) {
+  const screenshotBase64 = await captureScreenshot();
+  const context = await getPageContext(tab);
+
+  if (!screenshotBase64) {
+    return { responseText: 'Screenshot capture failed. Please grant screen capture permission.' };
+  }
+
+  const response = await fetch(`${getBackendUrl()}/api/voice`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: currentSessionId || generateSessionId(),
+      transcript: 'Analyze what is on this screen. Describe the main content, key interactive elements (buttons, forms, links), and suggest the most useful action I could take.',
+      pageContext: context,
+      vapiRecording: null,
+      screenshotBase64,
+    })
+  });
+  if (!response.ok) throw new Error(`Backend error: ${response.status}`);
+  return await response.json();
+}
+
+// ── TTS synthesis ──────────────────────────────────────────────────────
 async function synthesizeSpeech(text) {
   const response = await fetch(`${getBackendUrl()}/api/tts`, {
     method: 'POST',
@@ -79,9 +128,10 @@ async function synthesizeSpeech(text) {
     body: JSON.stringify({ text })
   });
   if (!response.ok) throw new Error(`TTS error: ${response.status}`);
-  return await response.json(); // { audioBase64: string }
+  return await response.json();
 }
 
+// ── Page context capture ───────────────────────────────────────────────
 async function getPageContext(tab) {
   try {
     const result = await chrome.scripting.executeScript({

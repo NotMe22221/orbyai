@@ -56,11 +56,57 @@ export async function sendMessage(
   return data.content?.[0]?.value || '';
 }
 
-// One-shot: creates a fresh chat per call (used by AgentA / AgentB)
+/**
+ * Send a message with an optional screenshot image.
+ * GPT-4o (GPT_4O) supports vision — image is sent as image_url content item.
+ */
+export async function sendMessageWithVision(
+  accessToken: string,
+  chatId: string,
+  text: string,
+  imageBase64?: string | null
+): Promise<string> {
+  const baseUrl = process.env.API_URL || 'https://core-api.deploy.ai';
+
+  const contentItems: Array<Record<string, unknown>> = [
+    { type: 'text', value: text },
+  ];
+
+  if (imageBase64) {
+    contentItems.push({
+      type: 'image_url',
+      image_url: { url: `data:image/png;base64,${imageBase64}` },
+    });
+  }
+
+  const res = await fetch(`${baseUrl}/messages`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'X-Org': process.env.ORG_ID || '',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ chatId, stream: false, content: contentItems }),
+  });
+  const data = await res.json();
+  return data.content?.[0]?.value || '';
+}
+
+// One-shot: creates a fresh chat per call (used by AgentA)
 export async function callDeployAI(prompt: string): Promise<string> {
   const token = await getAccessToken();
   const chatId = await createChat(token);
   return await sendMessage(token, chatId, prompt);
+}
+
+// One-shot with vision: for AgentB when a screenshot is available
+export async function callDeployAIWithVision(
+  prompt: string,
+  imageBase64?: string | null
+): Promise<string> {
+  const token = await getAccessToken();
+  const chatId = await createChat(token);
+  return await sendMessageWithVision(token, chatId, prompt, imageBase64);
 }
 
 /**

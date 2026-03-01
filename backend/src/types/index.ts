@@ -16,6 +16,8 @@ export interface VoiceRequest {
   transcript: string;
   pageContext: PageContext;
   vapiRecording?: string | null;
+  /** Base64-encoded PNG screenshot (no data URL prefix) for visual context */
+  screenshotBase64?: string | null;
 }
 
 export interface BrowserAction {
