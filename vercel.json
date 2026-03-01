@@ -3,13 +3,6 @@
   "installCommand": "cd backend && npm install",
   "outputDirectory": "backend/.next",
   "framework": "nextjs",
-  "functions": {
-    "backend/src/app/api/voice/route.ts": { "maxDuration": 30 },
-    "backend/src/app/api/transcribe/route.ts": { "maxDuration": 30 },
-    "backend/src/app/api/tts/route.ts": { "maxDuration": 15 },
-    "backend/src/app/api/agent-url/route.ts": { "maxDuration": 10 },
-    "backend/src/app/api/stream/route.ts": { "maxDuration": 60 }
-  },
   "headers": [
     {
       "source": "/api/(.*)",
