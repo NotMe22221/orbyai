@@ -16,6 +16,31 @@ async function getBackendUrl() {
   }
 }
 
+// ── Safe JSON fetch (handles HTML error pages gracefully) ──────
+async function safeJsonFetch(url, options = {}) {
+  let response;
+  try {
+    response = await fetch(url, options);
+  } catch (networkErr) {
+    throw new Error(`Network error reaching ${url}: ${networkErr.message}. Check your backend URL in the extension popup.`);
+  }
+
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    // Server returned HTML (404/500 page) — likely wrong URL or deployment issue
+    throw new Error(
+      `Backend at ${new URL(url).hostname} returned a ${response.status} HTML page instead of JSON. ` +
+      `Open the extension popup and update the Backend URL to your Vercel deployment URL.`
+    );
+  }
+
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.error || `Backend error ${response.status}`);
+  }
+  return data;
+}
+
 // ── Hotkey / toolbar click ──────────────────────────────────────────
 chrome.action.onClicked.addListener(async (tab) => { await toggleOverlay(tab); });
 
@@ -84,12 +109,12 @@ async function handleVoiceCommand(payload, tab) {
 
   if (!transcript && payload.audioBase64) {
     const backend = await getBackendUrl();
-    const sttResult = await fetch(`${backend}/api/transcribe`, {
+    // ✅ Use safeJsonFetch — detects HTML responses and gives clear error
+    const sttData = await safeJsonFetch(`${backend}/api/transcribe`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ audioBase64: payload.audioBase64, mimeType: payload.mimeType || 'audio/webm' })
     });
-    const sttData = await sttResult.json();
     transcript = sttData.transcript;
     recordingId = sttData.recordingId;
   }
@@ -100,7 +125,8 @@ async function handleVoiceCommand(payload, tab) {
     getBackendUrl(),
   ]);
 
-  const response = await fetch(`${backend}/api/voice`, {
+  // ✅ Use safeJsonFetch for voice call too
+  return await safeJsonFetch(`${backend}/api/voice`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -111,8 +137,6 @@ async function handleVoiceCommand(payload, tab) {
       screenshotBase64,
     })
   });
-  if (!response.ok) throw new Error(`Backend error: ${response.status}`);
-  return await response.json();
 }
 
 // ── Dedicated screen analysis ──────────────────────────────────────
@@ -127,7 +151,7 @@ async function handleAnalyzeScreen(tab) {
     return { responseText: 'Screenshot capture failed. Please grant screen capture permission and try again.' };
   }
 
-  const response = await fetch(`${backend}/api/voice`, {
+  return await safeJsonFetch(`${backend}/api/voice`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -138,20 +162,16 @@ async function handleAnalyzeScreen(tab) {
       screenshotBase64,
     })
   });
-  if (!response.ok) throw new Error(`Backend error: ${response.status}`);
-  return await response.json();
 }
 
 // ── TTS ─────────────────────────────────────────────────────────
 async function synthesizeSpeech(text) {
   const backend = await getBackendUrl();
-  const response = await fetch(`${backend}/api/tts`, {
+  return await safeJsonFetch(`${backend}/api/tts`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text })
   });
-  if (!response.ok) throw new Error(`TTS error: ${response.status}`);
-  return await response.json();
 }
 
 // ── Page context ─────────────────────────────────────────────────────
